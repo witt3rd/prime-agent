@@ -234,6 +234,27 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		}
 	}
 
+	// The session file/id is often assigned shortly AFTER `session_start` (on
+	// first persist), and an idle agent may not send another state report. So a
+	// one-shot report at start misses the resumable ref. Poll briefly and, once
+	// the ref exists, publish a report carrying it so Herdr registers the session.
+	function registerResumableSession(): void {
+		let attempts = 0;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const poll = () => {
+			refreshBoundSessionRef();
+			if (currentAgentSessionPath || currentAgentSessionId) {
+				publishState(true);
+				return;
+			}
+			attempts += 1;
+			if (attempts < 40) {
+				timer = setTimeout(poll, 250);
+			}
+		};
+		timer = setTimeout(poll, 100);
+	}
+
 	function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
 		if (currentAgentSessionPath) {
 			return { ...params, agent_session_path: currentAgentSessionPath };
@@ -400,6 +421,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 			}
 		}
 		publishState(true);
+		registerResumableSession();
 	});
 
 	const unsubscribeBlocked = pi.events.on("herdr:blocked", (data: any) => {
