@@ -41,7 +41,7 @@ export const SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE = 75;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "source" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -104,7 +104,26 @@ export function detectInstallMethod(): InstallMethod {
 		return "npm";
 	}
 
+	if (isSourceInstall()) {
+		return "source";
+	}
+
 	return "unknown";
+}
+
+function isSourceInstall(): boolean {
+	try {
+		const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
+		if (resolvedPath.includes("/node_modules/")) return false;
+		const packageDir = getPackageDir();
+		const repoRoot = require("path").resolve(packageDir, "..", "..");
+		return (
+			require("fs").existsSync(require("path").join(repoRoot, ".git")) &&
+			require("fs").existsSync(require("path").join(repoRoot, "package.json"))
+		);
+	} catch {
+		return false;
+	}
 }
 
 function isHomebrewInstall(): boolean {
@@ -196,6 +215,11 @@ function getSelfUpdateCommandForMethod(
 					: makeSelfUpdateCommandStep(command, [...prefixArgs, "uninstall", "-g", installedPackageName]);
 			return makeSelfUpdateCommand(installStep, uninstallStep, { uninstallAfterInstall });
 		}
+		case "source": {
+			const packageDir = getPackageDir();
+			const repoRoot = require("path").resolve(packageDir, "..", "..");
+			return makeSelfUpdateCommand(makeSelfUpdateCommandStep("bash", ["-c", `cd "${repoRoot}" && npm run build`]));
+		}
 		case "unknown":
 			return undefined;
 	}
@@ -258,6 +282,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 		}
 		case "bun-binary":
 		case "homebrew":
+		case "source":
 		case "unknown":
 			return [];
 	}
