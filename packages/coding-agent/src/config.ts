@@ -338,7 +338,10 @@ export function getSelfUpdateCommand(
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
 	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
-	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
+	if (!command) return undefined;
+	// Source installs skip the global-package-manager check (they're not managed by npm/yarn/bun)
+	if (method === "source") return command;
+	if (!isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
 		return undefined;
 	}
 	return command;
