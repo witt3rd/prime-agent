@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
@@ -1073,6 +1073,140 @@ async function stopTrackedProcess(
 		await delay(25);
 	}
 	return !isProcessAlive(pid);
+}
+
+/**
+ * Scan daemon worker descriptors for stale/failed workers that block operations
+ * like `prime-agent update`. Returns a report of issues found and fixes applied.
+ */
+export async function checkStaleWorkers(json: boolean): Promise<{ cleaned: number; issues: string[] }> {
+	const workerBase = join(getAgentDir(), "daemon-workers");
+	const issues: string[] = [];
+	const cleaned = 0;
+
+	if (!existsSync(workerBase)) {
+		if (json) console.log(JSON.stringify({ cleaned: 0, issues: [] }));
+		return { cleaned: 0, issues };
+	}
+
+	for (const subdir of readdirSync(workerBase)) {
+		const workerDir = join(workerBase, subdir);
+		if (!statSync(workerDir).isDirectory()) continue;
+
+		for (const filename of readdirSync(workerDir)) {
+			if (!filename.endsWith(".json") || filename === "supervisor-config") continue;
+			const filepath = join(workerDir, filename);
+			try {
+				const desc = JSON.parse(readFileSync(filepath, "utf-8"));
+				const lifecycle = desc.lifecycle;
+				const workerId = desc.workerId ?? filename.replace(".json", "");
+
+				if (lifecycle === "failed" || lifecycle === "disconnected") {
+					const sessionId = desc.rootSessionId ?? "?";
+					const sessionFile = desc.sessionFile ?? "?";
+					const sessionExists = existsSync(sessionFile);
+					const stale = lifecycle === "failed" && !sessionExists;
+
+					if (stale) {
+						issues.push(
+							`stale failed worker ${workerId} (session ${sessionId.slice(0, 8)}..., session file ${sessionExists ? "exists" : "missing"})`,
+						);
+						if (!json)
+							console.log(
+								chalk.yellow(
+									`  stale failed worker: ${workerId} (lifecycle=${lifecycle}, session=${sessionId.slice(0, 8)}...)`,
+								),
+							);
+					}
+				}
+			} catch {}
+		}
+	}
+
+	// Check for stale update-restart status files
+	const updateDir = join(getAgentDir(), "update-restarts");
+	if (existsSync(updateDir)) {
+		const staleFiles = readdirSync(updateDir).filter((f) => f.endsWith(".json"));
+		if (staleFiles.length > 0) {
+			issues.push(`${staleFiles.length} stale update-restart status file(s)`);
+			if (!json)
+				console.log(chalk.yellow(`  ${staleFiles.length} stale update-restart status file(s) in update-restarts/`));
+		}
+	}
+
+	if (json) {
+		console.log(JSON.stringify({ cleaned, issues }, null, 2));
+	} else if (issues.length === 0) {
+		console.log(chalk.green("No stale workers or update-restart state found."));
+	}
+
+	return { cleaned, issues };
+}
+
+/**
+ * Clean stale workers and update-restart state.
+ * Removes failed/disconnected worker descriptors and stale update-restart files.
+ * Does NOT kill live processes — only removes descriptor files that block the coordinator.
+ */
+export async function cleanStaleWorkers(json: boolean): Promise<void> {
+	const workerBase = join(getAgentDir(), "daemon-workers");
+	const updateDir = join(getAgentDir(), "update-restarts");
+	let cleaned = 0;
+	const details: string[] = [];
+
+	if (existsSync(workerBase)) {
+		for (const subdir of readdirSync(workerBase)) {
+			const workerDir = join(workerBase, subdir);
+			if (!statSync(workerDir).isDirectory()) continue;
+
+			for (const filename of readdirSync(workerDir)) {
+				if (!filename.endsWith(".json") || filename === "supervisor-config") continue;
+				const filepath = join(workerDir, filename);
+				try {
+					const desc = JSON.parse(readFileSync(filepath, "utf-8"));
+					const lifecycle = desc.lifecycle;
+					const workerId = desc.workerId ?? filename.replace(".json", "");
+					const sessionExists = existsSync(desc.sessionFile ?? "");
+
+					if ((lifecycle === "failed" || lifecycle === "disconnected") && !sessionExists) {
+						rmSync(filepath);
+						cleaned++;
+						details.push(`removed stale worker descriptor: ${workerId} (lifecycle=${lifecycle})`);
+					}
+				} catch {}
+			}
+			// Clean recovery/orphan files for removed workers
+			for (const filename of readdirSync(workerDir)) {
+				if (filename.endsWith(".recovery.jsonl") || filename.endsWith(".orphans.jsonl")) {
+					const base = filename.replace(/\.(recovery|orphans)\.jsonl$/, ".json");
+					if (!existsSync(join(workerDir, base))) {
+						rmSync(join(workerDir, filename));
+						cleaned++;
+						details.push(`removed orphaned ${filename}`);
+					}
+				}
+			}
+		}
+	}
+
+	// Clean stale update-restart status files
+	if (existsSync(updateDir)) {
+		const staleFiles = readdirSync(updateDir).filter((f) => f.endsWith(".json"));
+		for (const filename of staleFiles) {
+			rmSync(join(updateDir, filename));
+			cleaned++;
+			details.push(`removed stale update-restart: ${filename}`);
+		}
+	}
+
+	if (json) {
+		console.log(JSON.stringify({ cleaned, details }, null, 2));
+	} else if (cleaned === 0) {
+		console.log(chalk.green("No stale workers or update-restart state to clean."));
+	} else {
+		console.log(chalk.green(`Cleaned ${cleaned} item(s):`));
+		for (const d of details) console.log(chalk.green(`  ${d}`));
+	}
 }
 
 export async function runReap(json: boolean, force: boolean): Promise<void> {

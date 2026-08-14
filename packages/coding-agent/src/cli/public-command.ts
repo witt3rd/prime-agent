@@ -13,7 +13,7 @@ import {
 	REMOVED_COMMAND_NAMES,
 } from "./command-registry.js";
 import { handleDaemonCommand } from "./daemon-command.js";
-import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
+import { checkStaleWorkers, cleanStaleWorkers, runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
 
 export interface PublicCommandResult {
@@ -250,10 +250,13 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const json = options.has("--json");
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await cleanStaleWorkers(json);
+		await runReap(json, false);
 	} else {
-		await runPs(options.has("--json"));
+		await checkStaleWorkers(json);
+		await runPs(json);
 	}
 	return HANDLED;
 }
